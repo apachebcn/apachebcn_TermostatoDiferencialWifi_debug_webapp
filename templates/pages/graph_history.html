@@ -1,0 +1,721 @@
+{% extends 'base.html' %}
+{% load static %}
+
+{% block extra_head %}
+    <script src="{% static 'js/highcharts/highcharts.js' %}"></script>
+    <script src="{% static 'js/highcharts/exporting.js' %}"></script>
+    <script src="{% static 'js/highcharts/export-data.js' %}"></script>
+    <script src="{% static 'js/highcharts/accessibility.js' %}"></script>
+{% endblock %}
+
+{% block content %}
+<div class="panel">
+    <div id="error-box" class="error-box"></div>
+
+    <div class="form-row date-row">
+        <button type="button" class="btn btn-secondary day-nav-btn" id="btn-day-prev"
+                title="Ir al día anterior con datos">&larr; Día Antes</button>
+        <div class="date-fields">
+            <div class="form-field">
+                <label for="start_local_date_str">Fecha inicio</label>
+                <input type="text" id="start_local_date_str" value="{{ start_local_date_str }}"
+                       placeholder="dd/mm/yyyy hh:mm" inputmode="numeric" autocomplete="off" spellcheck="false">
+            </div>
+            <div class="form-field">
+                <label for="end_local_date_str">Fecha fin</label>
+                <input type="text" id="end_local_date_str" value="{{ end_local_date_str }}"
+                       placeholder="dd/mm/yyyy hh:mm" inputmode="numeric" autocomplete="off" spellcheck="false">
+            </div>
+        </div>
+        <button type="button" class="btn btn-secondary day-nav-btn" id="btn-day-next"
+                title="Ir al día siguiente con datos">Día Después &rarr;</button>
+    </div>
+
+    <div id="day-nav-info" class="muted" style="margin-bottom:12px; display:none;"></div>
+
+    <div class="form-row">
+        <div class="form-field">
+            <label for="resolution">Resolución</label>
+            <select id="resolution">
+                <option value="auto" selected>Todos (automático)</option>
+                <option value="raw">Todos (sin agrupar)</option>
+                <option value="5s">5 segundos</option>
+                <option value="10s">10 segundos</option>
+                <option value="15s">15 segundos</option>
+                <option value="30s">30 segundos</option>
+                <option value="1min">1 minuto</option>
+                <option value="5min">5 minutos</option>
+                <option value="15min">15 minutos</option>
+                <option value="30min">30 minutos</option>
+                <option value="1h">1 hora</option>
+                <option value="6h">6 horas</option>
+                <option value="1D">1 día</option>
+            </select>
+        </div>
+        <button type="button" id="btn-refresh">Actualizar</button>
+        <a href="#" id="btn-export" class="btn btn-secondary">Exportar CSV</a>
+        <div class="delete-actions">
+            <form method="post" action="{% url 'data_history_delete_all_view' %}"
+                  onsubmit="return confirm('¿Borrar TODO el historial de este usuario? Esta acción no se puede deshacer.');">
+                {% csrf_token %}
+                <button type="submit" class="btn btn-danger">Borrar todos los datos</button>
+            </form>
+            <button type="button" class="btn btn-danger" id="btn-delete-range"
+                    title="Borrar los datos del rango de fechas mostrado">Borrar estos datos</button>
+        </div>
+    </div>
+
+    <div id="chart-info" class="muted" style="margin-bottom:12px;"></div>
+
+    <div class="nav-buttons">
+        <button type="button" class="btn btn-secondary" id="nav-left">&larr; Izquierda</button>
+        <button type="button" class="btn btn-secondary" id="nav-zoom-out">Zoom -</button>
+        <button type="button" class="btn btn-secondary" id="nav-zoom-in">Zoom +</button>
+        <button type="button" class="btn btn-secondary" id="nav-right">Derecha &rarr;</button>
+        <button type="button" class="btn btn-secondary" id="nav-reset">Reset</button>
+    </div>
+
+    <div id="chart-temperaturas" class="chart-block"></div>
+    <div id="chart-relays-pumps" class="chart-block"></div>
+    <div id="chart-umbrales" class="chart-block"></div>
+</div>
+
+<div id="loading-overlay" class="loading-overlay" hidden>
+    <div class="spinner"></div>
+    <span>Cargando datos…</span>
+</div>
+
+<style>
+    .chart-block { width: 100%; height: 520px; margin-bottom: 24px; }
+    .nav-buttons { display: flex; gap: 8px; margin-bottom: 16px; flex-wrap: wrap; }
+    .nav-buttons .btn { padding: 6px 14px; font-size: 0.85rem; }
+    .date-row { justify-content: space-between; }
+    .date-fields { display: flex; gap: 16px; flex-wrap: wrap; }
+    .day-nav-btn { white-space: nowrap; }
+    #start_local_date_str, #end_local_date_str { min-width: 170px; font-variant-numeric: tabular-nums; }
+    .delete-actions { margin-left: auto; display: flex; gap: 8px; align-items: flex-end; }
+    .delete-actions form { margin: 0; }
+    .loading-overlay {
+        position: fixed;
+        inset: 0;
+        z-index: 1000;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        gap: 12px;
+        background: rgba(244, 246, 249, 0.75);
+        color: var(--text);
+        font-size: 0.9rem;
+    }
+    .loading-overlay[hidden] { display: none; }
+    .spinner {
+        width: 44px;
+        height: 44px;
+        border: 4px solid #d1d5db;
+        border-top-color: var(--accent);
+        border-radius: 50%;
+        animation: spin 0.8s linear infinite;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+</style>
+
+<script>
+(function () {
+    const charts = {};
+    let syncingExtremes = false;
+
+    function showError(msg) {
+        const box = document.getElementById('error-box');
+        box.textContent = String(msg);
+        box.style.display = 'block';
+        renderInfo(null);
+    }
+
+    function hideError() {
+        document.getElementById('error-box').style.display = 'none';
+    }
+
+    function setDayNavInfo(msg) {
+        const el = document.getElementById('day-nav-info');
+        el.textContent = msg || '';
+        el.style.display = msg ? 'block' : 'none';
+    }
+
+    // ---------- Indicador de carga ----------
+    // Se muestra con un pequeño retardo para no parpadear en peticiones rápidas.
+    let loadingCount = 0;
+    let loadingTimer = null;
+
+    function setOverlayVisible(visible) {
+        document.getElementById('loading-overlay').hidden = !visible;
+    }
+
+    function showLoading() {
+        loadingCount += 1;
+        if (loadingCount !== 1 || loadingTimer) { return; }
+        loadingTimer = setTimeout(function () {
+            loadingTimer = null;
+            if (loadingCount > 0) { setOverlayVisible(true); }
+        }, 150);
+    }
+
+    function hideLoading() {
+        loadingCount = Math.max(0, loadingCount - 1);
+        if (loadingCount > 0) { return; }
+        if (loadingTimer) {
+            clearTimeout(loadingTimer);
+            loadingTimer = null;
+        }
+        setOverlayVisible(false);
+    }
+
+    function csrfToken() {
+        const input = document.querySelector('input[name="csrfmiddlewaretoken"]');
+        return input ? input.value : '';
+    }
+
+    // ---------- Fechas en formato dd/mm/yyyy hh:mm ----------
+    const DATE_RE = /^(\d{1,2})\/(\d{1,2})\/(\d{4})[\s,]+(\d{1,2}):(\d{1,2})$/;
+
+    function pad2(n) {
+        return (n < 10 ? '0' : '') + n;
+    }
+
+    function parseDateInput(value) {
+        const m = DATE_RE.exec(String(value || '').trim());
+        if (!m) { return null; }
+        const day = Number(m[1]);
+        const month = Number(m[2]);
+        const year = Number(m[3]);
+        const hour = Number(m[4]);
+        const minute = Number(m[5]);
+        if (month < 1 || month > 12 || hour > 23 || minute > 59) { return null; }
+        const dt = new Date(year, month - 1, day, hour, minute, 0, 0);
+        if (dt.getFullYear() !== year || dt.getMonth() !== month - 1 || dt.getDate() !== day) {
+            return null;
+        }
+        return dt;
+    }
+
+    function formatDateInput(dt) {
+        return pad2(dt.getDate()) + '/' + pad2(dt.getMonth() + 1) + '/' + dt.getFullYear() +
+            ' ' + pad2(dt.getHours()) + ':' + pad2(dt.getMinutes());
+    }
+
+    function formatDateOnly(dt) {
+        return pad2(dt.getDate()) + '/' + pad2(dt.getMonth() + 1) + '/' + dt.getFullYear();
+    }
+
+    function dateInputs() {
+        return {
+            start: document.getElementById('start_local_date_str'),
+            end: document.getElementById('end_local_date_str'),
+        };
+    }
+
+    function normalizeDateInputs() {
+        const inputs = dateInputs();
+        const start = parseDateInput(inputs.start.value);
+        const end = parseDateInput(inputs.end.value);
+        if (!start || !end) {
+            showError('Formato de fecha no válido. Usa dd/mm/yyyy hh:mm (por ejemplo 05/02/2026 08:30).');
+            return false;
+        }
+        if (start > end) {
+            showError('La fecha fin no puede ser anterior a la fecha inicio.');
+            return false;
+        }
+        inputs.start.value = formatDateInput(start);
+        inputs.end.value = formatDateInput(end);
+        return true;
+    }
+
+    function currentParams() {
+        return {
+            start_local_date_str: document.getElementById('start_local_date_str').value,
+            end_local_date_str: document.getElementById('end_local_date_str').value,
+            resolution: document.getElementById('resolution').value,
+        };
+    }
+
+    function renderInfo(info) {
+        const el = document.getElementById('chart-info');
+        if (!info) {
+            el.textContent = '';
+            return;
+        }
+        const res = info.resample === 'raw' ? 'sin agrupar (todos los datos)' : info.resample;
+        el.textContent = 'Registros: ' + info.rows + ' · Resolución: ' + res +
+            ' · Puntos: ' + info.points;
+    }
+
+    function setEmptyMessage(containerId, message) {
+        const el = document.getElementById(containerId);
+        if (charts[containerId]) {
+            charts[containerId].destroy();
+            delete charts[containerId];
+        }
+        el.style.height = '';
+        el.innerHTML = '<div class="muted" style="padding:20px;text-align:center;">' + message + '</div>';
+    }
+
+    // Tooltip que muestra SIEMPRE el valor real del ESP32, no la posición
+    // desplazada que se usa para dibujar los carriles.
+    function realValuePointFormatter() {
+        const real = this.series.options.realValues;
+        let value = this.y;
+        if (real && real[this.index] !== undefined) {
+            value = real[this.index];
+        }
+        if (value === null || value === undefined) {
+            value = '-';
+        }
+        return '<span style="color:' + this.color + '">\u25CF</span> ' +
+            this.series.name + ': <b>' + value + '</b><br/>';
+    }
+
+    function baseChartOptions(title) {
+        return {
+            chart: { zoomType: 'x', animation: false },
+            title: { text: title },
+            xAxis: {
+                type: 'datetime',
+                events: {
+                    // Zoom interactivo (selección con el ratón): se replica en
+                    // el resto de gráficas para que muestren el mismo tramo.
+                    afterSetExtremes: function (event) {
+                        syncExtremes(this.chart, event);
+                    },
+                },
+            },
+            tooltip: { shared: true, valueDecimals: 2 },
+            plotOptions: {
+                series: {
+                    connectNulls: false,
+                    marker: { enabled: false },
+                    animation: false,
+                    turboThreshold: 0,
+                }
+            },
+        };
+    }
+
+    function renderLineChart(containerId, title, seriesData, options) {
+        const el = document.getElementById(containerId);
+        if (charts[containerId]) {
+            charts[containerId].destroy();
+            delete charts[containerId];
+        }
+        if (!seriesData || seriesData.length === 0) {
+            setEmptyMessage(containerId, 'Sin datos para esta gráfica');
+            return;
+        }
+        el.style.height = '';
+        const opts = baseChartOptions(title);
+        opts.yAxis = {
+            title: { text: options.yTitle || '' },
+            min: options.yMin,
+            max: options.yMax,
+        };
+        opts.series = seriesData.map(function (s) {
+            return {
+                name: s.name,
+                step: s.step ? 'left' : false,
+                data: s.data,
+                tooltip: { valueDecimals: s.step ? 0 : 2 },
+            };
+        });
+        charts[containerId] = Highcharts.chart(containerId, opts);
+    }
+
+    /**
+     * Gráfica de estados (relés / bombas).
+     * Un CARRIL por variable (y = carril + valor / maxComun * LANE_HEIGHT)
+     * para que no se solapen dos series con el mismo valor.
+     * Los estados comparten escala, así un mismo valor queda a la misma altura
+     * en todos los carriles. El tooltip muestra siempre el valor real.
+     */
+    function renderStateChart(containerId, title, seriesData) {
+        const LANE_HEIGHT = 0.8;
+        const el = document.getElementById(containerId);
+        if (charts[containerId]) {
+            charts[containerId].destroy();
+            delete charts[containerId];
+        }
+        if (!seriesData || seriesData.length === 0) {
+            setEmptyMessage(containerId, 'Sin estados (relés/bombas) en el rango');
+            return;
+        }
+
+        const useLanes = seriesData.length > 1;
+        const opts = baseChartOptions(title);
+        opts.tooltip.pointFormatter = realValuePointFormatter;
+
+        const realValuesList = seriesData.map(function (s) {
+            return s.data.map(function (p) { return p[1]; });
+        });
+
+        let statesMax = 0;
+        realValuesList.forEach(function (values) {
+            values.forEach(function (v) {
+                if (v !== null && v !== undefined && v > statesMax) { statesMax = v; }
+            });
+        });
+        if (statesMax < 1) { statesMax = 1; }
+
+        const series = seriesData.map(function (s, laneIndex) {
+            // El primer elemento de la lista va arriba: se invierte la posición.
+            const lanePosition = seriesData.length - 1 - laneIndex;
+            const item = {
+                name: s.name,
+                step: 'left',
+                realValues: realValuesList[laneIndex],
+                yAxis: 0,
+                lineWidth: 1.5,
+            };
+            if (!useLanes) {
+                item.data = s.data;
+                return item;
+            }
+            item.data = s.data.map(function (p) {
+                if (p[1] === null || p[1] === undefined) { return [p[0], null]; }
+                return [p[0], lanePosition + (p[1] / statesMax) * LANE_HEIGHT];
+            });
+            return item;
+        });
+
+        if (useLanes) {
+            const height = Math.max(320, 110 + seriesData.length * 34);
+            el.style.height = height + 'px';
+            opts.chart.height = height;
+            opts.yAxis = {
+                min: 0,
+                max: seriesData.length - 1 + LANE_HEIGHT,
+                tickPositions: seriesData.map(function (_, i) { return i + LANE_HEIGHT / 2; }),
+                labels: {
+                    style: { fontSize: '10px' },
+                    formatter: function () {
+                        const lanePosition = Math.round(this.value - LANE_HEIGHT / 2);
+                        const idx = seriesData.length - 1 - lanePosition;
+                        return seriesData[idx] ? seriesData[idx].name : '';
+                    },
+                },
+                title: { text: '' },
+                gridLineWidth: 1,
+                startOnTick: false,
+                endOnTick: false,
+            };
+        } else {
+            el.style.height = '';
+            opts.yAxis = { min: 0, allowDecimals: false, title: { text: '' } };
+        }
+
+        opts.series = series;
+        charts[containerId] = Highcharts.chart(containerId, opts);
+    }
+
+    /**
+     * Gráfica de valores numéricos (umbrales) con eje real 0..N,
+     * para poder leer el nivel exacto de cada variable.
+     */
+    function renderValueChart(containerId, title, seriesData) {
+        const el = document.getElementById(containerId);
+        if (charts[containerId]) {
+            charts[containerId].destroy();
+            delete charts[containerId];
+        }
+        if (!seriesData || seriesData.length === 0) {
+            el.style.display = 'none';
+            el.innerHTML = '';
+            return;
+        }
+        el.style.display = '';
+        el.style.height = '300px';
+
+        const opts = baseChartOptions(title);
+        opts.chart.height = 300;
+        opts.tooltip.pointFormatter = realValuePointFormatter;
+
+        let maxValue = 0;
+        seriesData.forEach(function (s) {
+            s.data.forEach(function (p) {
+                if (p[1] !== null && p[1] !== undefined && p[1] > maxValue) { maxValue = p[1]; }
+            });
+        });
+        // La escala de umbrales es 0..5 como mínimo (referencia fija);
+        // si algún valor la supera, el eje crece.
+        maxValue = Math.max(5, Math.ceil(maxValue));
+
+        opts.yAxis = {
+            min: 0,
+            max: maxValue,
+            tickInterval: maxValue <= 12 ? 1 : null,
+            allowDecimals: false,
+            title: { text: 'nivel' },
+            gridLineWidth: 1,
+        };
+
+        const dashStyles = ['Solid', 'ShortDash', 'ShortDot', 'LongDash', 'Dash', 'ShortDashDot'];
+        opts.series = seriesData.map(function (s, i) {
+            return {
+                name: s.name,
+                step: 'left',
+                data: s.data,
+                realValues: s.data.map(function (p) { return p[1]; }),
+                lineWidth: 2,
+                dashStyle: dashStyles[i % dashStyles.length],
+            };
+        });
+        charts[containerId] = Highcharts.chart(containerId, opts);
+    }
+
+    function renderAll(resp) {
+        hideError();
+        const data = resp.data || {};
+        renderInfo(resp.info);
+        renderLineChart('chart-temperaturas', 'Temperaturas', data.temperatures, { yTitle: 'Temperaturas' });
+
+        const relaysPumps = data.relays_pumps || [];
+        const states = relaysPumps.filter(function (s) { return s.step; });
+        const values = relaysPumps.filter(function (s) { return !s.step; });
+        renderStateChart('chart-relays-pumps', 'Relés y bombas', states);
+        renderValueChart('chart-umbrales', 'Umbrales de bomba pulsada (nivel)', values);
+    }
+
+    function fetchAndUpdate() {
+        if (!normalizeDateInputs()) { return Promise.resolve(); }
+        const params = new URLSearchParams(currentParams());
+        showLoading();
+        return fetch('/get_json_data_graph_view/?' + params.toString())
+            .then(function (r) { return r.json(); })
+            .then(function (resp) {
+                if (resp.status === 'error') {
+                    showError(resp.error);
+                    return;
+                }
+                renderAll(resp);
+            })
+            .catch(function (err) {
+                showError('Error al obtener datos: ' + err);
+            })
+            .finally(hideLoading);
+    }
+
+    // ---------- Navegación temporal (pan / zoom sobre las 3 gráficas) ----------
+    const NAV_STEP = 0.25;  // 25 % del rango visible, como en el proyecto original
+
+    function chartList() {
+        return ['chart-temperaturas', 'chart-relays-pumps', 'chart-umbrales']
+            .map(function (id) { return charts[id]; })
+            .filter(Boolean);
+    }
+
+    function getExtremes() {
+        const list = chartList();
+        if (!list.length) { return null; }
+        const extremes = list[0].xAxis[0].getExtremes();
+        if (!isFinite(extremes.min) || !isFinite(extremes.max) || extremes.max <= extremes.min) {
+            return null;
+        }
+        return extremes;
+    }
+
+    function applyExtremes(min, max) {
+        syncingExtremes = true;
+        try {
+            chartList().forEach(function (chart) {
+                chart.xAxis[0].setExtremes(min, max);
+            });
+        } finally {
+            syncingExtremes = false;
+        }
+    }
+
+    /** Replica el rango visible de una gráfica en las demás (zoom sincronizado). */
+    function syncExtremes(sourceChart, event) {
+        if (syncingExtremes) { return; }
+        const min = event ? event.min : null;
+        const max = event ? event.max : null;
+        if (!isFinite(min) || !isFinite(max) || max <= min) { return; }
+        syncingExtremes = true;
+        try {
+            chartList().forEach(function (chart) {
+                if (chart !== sourceChart) {
+                    chart.xAxis[0].setExtremes(min, max);
+                }
+            });
+        } finally {
+            syncingExtremes = false;
+        }
+    }
+
+    function navigate(kind) {
+        const extremes = getExtremes();
+        if (!extremes) { return; }
+        const range = extremes.max - extremes.min;
+        let min = extremes.min;
+        let max = extremes.max;
+
+        if (kind === 'left') {
+            min -= range * NAV_STEP;
+            max -= range * NAV_STEP;
+        } else if (kind === 'right') {
+            min += range * NAV_STEP;
+            max += range * NAV_STEP;
+        } else if (kind === 'zoom_in') {
+            min += range * NAV_STEP;
+            max -= range * NAV_STEP;
+        } else if (kind === 'zoom_out') {
+            min -= range * NAV_STEP;
+            max += range * NAV_STEP;
+        } else if (kind === 'reset') {
+            applyExtremes(null, null);
+            return;
+        } else {
+            return;
+        }
+        applyExtremes(min, max);
+    }
+
+    // ---------- Día anterior / siguiente con datos ----------
+    function requestNearestDataDay(referenceDate, direction) {
+        const params = new URLSearchParams({
+            date: formatDateOnly(referenceDate),
+            direction: direction,
+        });
+        return fetch('/get_nearest_data_day_view/?' + params.toString())
+            .then(function (r) { return r.json(); });
+    }
+
+    /** Pone el rango de fechas en el día completo indicado (00:00 - 23:59). */
+    function applyDataDay(dateStr) {
+        const day = String(dateStr).split('/').slice(0, 3).join('/');
+        const inputs = dateInputs();
+        inputs.start.value = day + ' 00:00';
+        inputs.end.value = day + ' 23:59';
+    }
+
+    /**
+     * Salta al día con datos más cercano en la dirección indicada.
+     * 'prev' toma como referencia la fecha inicio y 'next' la fecha fin, de
+     * modo que con rangos de varios días el salto es el esperado.
+     */
+    function goToAdjacentDataDay(direction) {
+        const inputs = dateInputs();
+        const reference = parseDateInput(
+            direction === 'next' ? inputs.end.value : inputs.start.value
+        );
+        if (!reference) {
+            showError('Formato de fecha no válido. Usa dd/mm/yyyy hh:mm (por ejemplo 05/02/2026 08:30).');
+            return;
+        }
+
+        setDayNavInfo('');
+        showLoading();
+        requestNearestDataDay(reference, direction)
+            .then(function (resp) {
+                if (resp.status === 'error') {
+                    setDayNavInfo(resp.error);
+                    return null;
+                }
+                applyDataDay(resp.date);
+                setDayNavInfo(resp.has_data_on_adjacent
+                    ? ''
+                    : 'No hay datos el ' + resp.adjacent_date +
+                      '; se muestra el día con datos más cercano: ' + resp.date + '.');
+                return fetchAndUpdate();
+            })
+            .catch(function (err) {
+                showError('Error al buscar el día con datos más cercano: ' + err);
+            })
+            .finally(hideLoading);
+    }
+
+    /** Tras borrar el rango mostrado, salta al día con datos más cercano. */
+    function goToDayWithDataAfterDelete(reference) {
+        return requestNearestDataDay(reference, 'next')
+            .then(function (resp) {
+                if (resp.status === 'ok') {
+                    applyDataDay(resp.date);
+                    return resp.date;
+                }
+                return requestNearestDataDay(reference, 'prev').then(function (prevResp) {
+                    if (prevResp.status === 'ok') {
+                        applyDataDay(prevResp.date);
+                        return prevResp.date;
+                    }
+                    return null;
+                });
+            });
+    }
+
+    function deleteRange() {
+        if (!normalizeDateInputs()) { return; }
+        const inputs = dateInputs();
+        const rangeText = inputs.start.value + ' — ' + inputs.end.value;
+        if (!window.confirm(
+            '¿Borrar TODOS los datos del rango ' + rangeText + '? Esta acción no se puede deshacer.'
+        )) {
+            return;
+        }
+
+        const reference = parseDateInput(inputs.end.value);
+        const body = new URLSearchParams(currentParams());
+        body.delete('resolution');
+
+        setDayNavInfo('');
+        showLoading();
+        fetch('/data_history_delete_range/', {
+            method: 'POST',
+            headers: {
+                'X-CSRFToken': csrfToken(),
+                'Content-Type': 'application/x-www-form-urlencoded',
+            },
+            body: body.toString(),
+        })
+            .then(function (r) { return r.json(); })
+            .then(function (resp) {
+                if (resp.status === 'error') {
+                    showError(resp.error);
+                    return null;
+                }
+                if (!resp.deleted) {
+                    setDayNavInfo('No había datos que borrar en el rango ' + rangeText + '.');
+                    return fetchAndUpdate();
+                }
+                return goToDayWithDataAfterDelete(reference).then(function (day) {
+                    if (!day) {
+                        setDayNavInfo('Se han borrado ' + resp.deleted +
+                            ' registros. No quedan más datos en el historial.');
+                        renderAll({ data: {}, info: null });
+                        return null;
+                    }
+                    setDayNavInfo('Se han borrado ' + resp.deleted +
+                        ' registros del rango ' + rangeText + '. Mostrando el ' + day + '.');
+                    return fetchAndUpdate();
+                });
+            })
+            .catch(function (err) {
+                showError('Error al borrar los datos: ' + err);
+            })
+            .finally(hideLoading);
+    }
+
+    document.getElementById('btn-refresh').addEventListener('click', function () {
+        setDayNavInfo('');
+        fetchAndUpdate();
+    });
+    document.getElementById('btn-delete-range').addEventListener('click', deleteRange);
+    document.getElementById('btn-day-prev').addEventListener('click', function () { goToAdjacentDataDay('prev'); });
+    document.getElementById('btn-day-next').addEventListener('click', function () { goToAdjacentDataDay('next'); });
+    document.getElementById('nav-left').addEventListener('click', function () { navigate('left'); });
+    document.getElementById('nav-right').addEventListener('click', function () { navigate('right'); });
+    document.getElementById('nav-zoom-in').addEventListener('click', function () { navigate('zoom_in'); });
+    document.getElementById('nav-zoom-out').addEventListener('click', function () { navigate('zoom_out'); });
+    document.getElementById('nav-reset').addEventListener('click', function () { navigate('reset'); });
+
+    document.addEventListener('DOMContentLoaded', fetchAndUpdate);
+})();
+</script>
+{% endblock %}

@@ -1,0 +1,16 @@
+*.pyc
+**/*.pyc
+__pycache__/
+**/__pycache__/
+
+# Generado por el comando <invoke> del docker raíz a partir de
+# settings_common.py + settings-files/settings-*.py
+project/settings.py
+
+# Entornos virtuales y ficheros de sistema
+.venv/
+venv/
+.DS_Store
+
+# Jupyter
+.ipynb_checkpoints/
