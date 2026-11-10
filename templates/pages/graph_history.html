@@ -502,6 +502,43 @@
             .finally(hideLoading);
     }
 
+    /** Descarga el CSV del rango de fechas seleccionado. */
+    function exportCsv() {
+        if (!normalizeDateInputs()) { return; }
+        const inputs = dateInputs();
+        const params = new URLSearchParams({
+            start_local_date_str: inputs.start.value,
+            end_local_date_str: inputs.end.value,
+        });
+
+        hideError();
+        showLoading();
+        fetch('/data_history_export/?' + params.toString())
+            .then(function (response) {
+                if (!response.ok) {
+                    return response.text().then(function (text) {
+                        showError(text || 'No se ha podido exportar el rango seleccionado.');
+                    });
+                }
+                return response.blob().then(function (blob) {
+                    const disposition = response.headers.get('Content-Disposition') || '';
+                    const match = /filename="?([^";]+)"?/.exec(disposition);
+                    const url = URL.createObjectURL(blob);
+                    const link = document.createElement('a');
+                    link.href = url;
+                    link.download = match ? match[1] : 'termostato_debug.csv';
+                    document.body.appendChild(link);
+                    link.click();
+                    link.remove();
+                    setTimeout(function () { URL.revokeObjectURL(url); }, 0);
+                });
+            })
+            .catch(function (err) {
+                showError('Error al exportar los datos: ' + err);
+            })
+            .finally(hideLoading);
+    }
+
     // ---------- Navegación temporal (pan / zoom sobre las 3 gráficas) ----------
     const NAV_STEP = 0.25;  // 25 % del rango visible, como en el proyecto original
 
@@ -707,6 +744,10 @@
         fetchAndUpdate();
     });
     document.getElementById('btn-delete-range').addEventListener('click', deleteRange);
+    document.getElementById('btn-export').addEventListener('click', function (event) {
+        event.preventDefault();
+        exportCsv();
+    });
     document.getElementById('btn-day-prev').addEventListener('click', function () { goToAdjacentDataDay('prev'); });
     document.getElementById('btn-day-next').addEventListener('click', function () { goToAdjacentDataDay('next'); });
     document.getElementById('nav-left').addEventListener('click', function () { navigate('left'); });
